@@ -29,7 +29,7 @@ SOURCE_HEADER_CANDIDATES = {
     "owner": ["Asset custodian", "Asset Custodian", "Owner"],
     "criticality": ["Criticality of the VM"],
     "department": ["Department / Sections", "Department / sections"],
-    "asset_owner": ["Asset Owner"],
+    "asset_owner": ["Asset Owner", "Asset owner"],
     "combined_notes": ["Department / Sections + Asset Owner", "Department / sections + Asset Owner"],
     "email": ["Asset custodian email", "Asset Custodian Email", "Owner Email", "OWNER_EMAIL_ID", "Email"],
 }
@@ -118,6 +118,16 @@ def build_notes(row: pd.Series, combined_column: str | None, department_column: 
     return ""
 
 
+def first_nonempty_text(row: pd.Series, columns: list[str | None]) -> str:
+    for column in columns:
+        if not column:
+            continue
+        value = clean_text(row.get(column))
+        if value:
+            return value
+    return ""
+
+
 def main() -> None:
     source_file = Path(SOURCE_FILE)
     source_frame = pd.read_excel(source_file)
@@ -128,7 +138,8 @@ def main() -> None:
 
     combined_notes_column = None
     department_column = None
-    asset_owner_column = None
+    asset_owner_primary_column = None
+    asset_owner_fallback_column = None
 
     try:
         combined_notes_column = find_column(source_frame, SOURCE_HEADER_CANDIDATES["combined_notes"])
@@ -141,9 +152,14 @@ def main() -> None:
         department_column = None
 
     try:
-        asset_owner_column = find_column(source_frame, SOURCE_HEADER_CANDIDATES["asset_owner"])
+        asset_owner_primary_column = find_column(source_frame, ["Asset Owner"])
     except KeyError:
-        asset_owner_column = None
+        asset_owner_primary_column = None
+
+    try:
+        asset_owner_fallback_column = find_column(source_frame, ["Asset owner"])
+    except KeyError:
+        asset_owner_fallback_column = None
 
     try:
         email_column = find_column(source_frame, SOURCE_HEADER_CANDIDATES["email"])
@@ -161,6 +177,9 @@ def main() -> None:
         if not email_value:
             email_value = resolve_email(owner_name, namespace, email_cache)
 
+        asset_owner_value = first_nonempty_text(row, [asset_owner_primary_column, asset_owner_fallback_column])
+        department_value = clean_text(row.get(department_column)) if department_column else ""
+
         output_rows.append(
             {
                 "COMPUTER_NAME": clean_text(row.get(computer_column)),
@@ -169,7 +188,15 @@ def main() -> None:
                 "OWNER": owner_name,
                 "LOCATION": "",
                 "SEARCH_TAG": clean_text(row.get(criticality_column)),
-                "NOTES": build_notes(row, None, department_column, asset_owner_column),
+                "NOTES": build_notes(
+                    pd.Series({
+                        department_column: department_value,
+                        asset_owner_primary_column or asset_owner_fallback_column: asset_owner_value,
+                    }),
+                    None,
+                    department_column,
+                    asset_owner_primary_column or asset_owner_fallback_column,
+                ),
                 "PRODUCT_NUMBER": "",
                 "SHIPPING_DATE": "",
                 "WARRANTY_EXPIRY_DATE": "",
