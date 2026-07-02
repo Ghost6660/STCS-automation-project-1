@@ -65,12 +65,13 @@ def split_ip_addresses(value: object) -> list[str]:
     return parts or [text]
 
 
-def build_custodian_email_map(cleaned_df: pd.DataFrame) -> tuple[dict[str, str], int, int]:
+def build_custodian_email_map(cleaned_df: pd.DataFrame) -> tuple[dict[str, str], int, int, int]:
     custodian_col = next((c for c in ("Asset Custodian", "Custodian") if c in cleaned_df.columns), None)
     if custodian_col is None:
         raise KeyError("Cleaned inventory must contain an Asset Custodian column.")
 
     email_map: dict[str, str] = {}
+    total_rows = 0
 
     try:
         import win32com.client
@@ -85,6 +86,8 @@ def build_custodian_email_map(cleaned_df: pd.DataFrame) -> tuple[dict[str, str],
         if not custodian:
             continue
 
+        total_rows += 1
+
         key = custodian.lower()
         if key in email_map:
             continue
@@ -94,7 +97,7 @@ def build_custodian_email_map(cleaned_df: pd.DataFrame) -> tuple[dict[str, str],
 
     success_count = sum(1 for value in email_map.values() if value != "not found")
     not_found_count = sum(1 for value in email_map.values() if value == "not found")
-    return email_map, success_count, not_found_count
+    return email_map, success_count, not_found_count, total_rows
 
 
 # --- vSphere cleaning (case-insensitive tag merge) ---------------------
@@ -514,9 +517,10 @@ def main() -> None:
     cleaned_df = pd.read_excel(cleaned_inv_path, dtype=str).fillna("")
 
     print("Resolving custodian emails from cleaned inventory...")
-    custodian_email_map, email_found_count, email_not_found_count = build_custodian_email_map(cleaned_df)
+    custodian_email_map, email_found_count, email_not_found_count, email_row_count = build_custodian_email_map(cleaned_df)
     print(f"Custodian emails found: {email_found_count}")
     print(f"Custodian emails not found: {email_not_found_count}")
+    print(f"Custodian email rows processed: {email_row_count}")
 
     asset_custodian_series = cleaned_df.get("Asset Custodian", pd.Series(index=cleaned_df.index, dtype=str))
     cleaned_df["custodian emails"] = asset_custodian_series.map(
