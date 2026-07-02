@@ -70,8 +70,15 @@ def build_custodian_email_map(cleaned_df: pd.DataFrame) -> dict[str, str]:
     if custodian_col is None:
         raise KeyError("Cleaned inventory must contain an Asset Custodian column.")
 
-    email_cache: dict[str, str] = {}
     email_map: dict[str, str] = {}
+
+    try:
+        import win32com.client
+
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        namespace = outlook.GetNamespace("MAPI")
+    except Exception:
+        namespace = None
 
     for custodian_value in cleaned_df[custodian_col].dropna().tolist():
         custodian = normalize_text(custodian_value)
@@ -82,7 +89,7 @@ def build_custodian_email_map(cleaned_df: pd.DataFrame) -> dict[str, str]:
         if key in email_map:
             continue
 
-        resolved = resolve_email_outlook(custodian, email_cache)
+        resolved = resolve_email_outlook(custodian, namespace)
         email_map[key] = resolved if resolved else "not found"
 
     return email_map
@@ -309,31 +316,26 @@ def fill_pending_owners(pending_df: pd.DataFrame, lookup: dict) -> pd.DataFrame:
 # --- Outlook email resolution (best-effort) -----------------------------
 
 
-def resolve_email_outlook(name: str, cache: dict) -> Optional[str]:
+def resolve_email_outlook(name: str, namespace) -> Optional[str]:
     if not name or name.lower() == "unassigned":
         return None
-    key = name.strip().lower()
-    if key in cache:
-        return cache[key]
-    try:
-        import win32com.client
 
-        session = win32com.client.Dispatch("MAPI")
-        recip = session.CreateRecipient(name)
-        recip.Resolve()
-        if recip.Resolved:
-            exch = recip.GetExchangeUser()
-            if exch is not None:
-                address = getattr(exch, "PrimarySmtpAddress", None)
-                if address:
-                    cache[key] = address
-                    return address
-        # fallback: try AddressEntry
-        cache[key] = None
+    if namespace is None:
         return None
-    except Exception:
-        cache[key] = None
-        return None
+
+    recipient = namespace.CreateRecipient(name)
+    recipient.Resolve()
+
+    if recipient.Resolved:
+        try:
+            exch_user = recipient.AddressEntry.GetExchangeUser()
+            if exch_user:
+                return exch_user.PrimarySmtpAddress
+            return recipient.Address
+        except Exception:
+            return recipient.Address
+
+    return None
 
 
 # --- Export per-owner CSV ------------------------------------------------
