@@ -65,6 +65,29 @@ def split_ip_addresses(value: object) -> list[str]:
     return parts or [text]
 
 
+def build_custodian_email_map(cleaned_df: pd.DataFrame) -> dict[str, str]:
+    custodian_col = next((c for c in ("Asset Custodian", "Custodian") if c in cleaned_df.columns), None)
+    if custodian_col is None:
+        raise KeyError("Cleaned inventory must contain an Asset Custodian column.")
+
+    email_cache: dict[str, str] = {}
+    email_map: dict[str, str] = {}
+
+    for custodian_value in cleaned_df[custodian_col].dropna().tolist():
+        custodian = normalize_text(custodian_value)
+        if not custodian:
+            continue
+
+        key = custodian.lower()
+        if key in email_map:
+            continue
+
+        resolved = resolve_email_outlook(custodian, email_cache)
+        email_map[key] = resolved if resolved else "not found"
+
+    return email_map
+
+
 # --- vSphere cleaning (case-insensitive tag merge) ---------------------
 
 
@@ -364,6 +387,31 @@ def export_per_owner_csv(pending_df: pd.DataFrame, output_csv: Path) -> Path:
     return output_csv
 
 
+def fill_owner_emails_from_map(dataframe: pd.DataFrame, email_map: dict[str, str]) -> pd.DataFrame:
+    df = dataframe.copy()
+    if "Owner" not in df.columns:
+        raise KeyError("Expected an Owner column when filling emails.")
+
+    if "Owner Email" not in df.columns:
+        df["Owner Email"] = ""
+
+    for index, row in df.iterrows():
+        owner = normalize_owner(row.get("Owner", ""))
+        if owner == "Unassigned":
+            df.at[index, "Owner Email"] = "not found"
+            continue
+
+        current_email = normalize_text(row.get("Owner Email", ""))
+        if current_email and current_email != "--":
+            df.at[index, "Owner Email"] = current_email
+            continue
+
+        df.at[index, "Owner Email"] = email_map.get(owner.lower(), "not found")
+
+    df["Owner Email"] = df["Owner Email"].map(normalize_email_value)
+    return df
+
+
 # --- Populate owner template (basic mapping) ----------------------------
 
 
@@ -382,7 +430,7 @@ TEMPLATE_COLUMNS = [
 ]
 
 
-def build_template_from_inventory(cleaned_df: pd.DataFrame, output_path: Path, email_cache: dict) -> Path:
+def build_template_from_inventory(cleaned_df: pd.DataFrame, output_path: Path, custodian_email_map: dict[str, str]) -> Path:
     rows = []
     # find candidate columns
     name_col = next((c for c in ("Name", '"Name"', "Computer Name") if c in cleaned_df.columns), None)
@@ -399,7 +447,7 @@ def build_template_from_inventory(cleaned_df: pd.DataFrame, output_path: Path, e
         # try email from row first
         owner_email = normalize_text(r.get(email_col, "")) if email_col else ""
         if not owner_email and owner:
-            owner_email = resolve_email_outlook(owner, email_cache) or ""
+            owner_email = custodian_email_map.get(owner.lower(), "not found")
         notes_parts = []
         if dep_col:
             depv = normalize_text(r.get(dep_col, ""))
@@ -461,6 +509,23 @@ def main() -> None:
     cleaned_inv_path = clean_vsphere_inventory(inventory_path, out_dir)
     cleaned_df = pd.read_excel(cleaned_inv_path, dtype=str).fillna("")
 
+    print("Resolving custodian emails from cleaned inventory...")
+    custodian_email_map = build_custodian_email_map(cleaned_df)
+
+    asset_custodian_series = cleaned_df.get("Asset Custodian", pd.Series(index=cleaned_df.index, dtype=str))
+    cleaned_df["custodian emails"] = asset_custodian_series.map(
+        lambda value: custodian_email_map.get(normalize_text(value).lower(), "not found") if normalize_text(value) else "not found"
+    )
+
+    column_order = list(cleaned_df.columns)
+    if "custodian emails" in column_order and "Asset Custodian" in column_order:
+        column_order.remove("custodian emails")
+        insert_at = column_order.index("Asset Custodian") + 1
+        column_order.insert(insert_at, "custodian emails")
+        cleaned_df = cleaned_df.loc[:, column_order]
+
+    cleaned_df.to_excel(cleaned_inv_path, index=False)
+
     # Step 2: build lookup and fill pending owners
     print("Building inventory lookup...")
     lookup = build_inventory_lookup(cleaned_df)
@@ -474,32 +539,9 @@ def main() -> None:
 
     filled_df = fill_pending_owners(pending_df, lookup)
 
+    filled_df = fill_owner_emails_from_map(filled_df, custodian_email_map)
+
     filled_out_path = out_dir / f"{pending_path.stem} with owners.xlsx"
-    filled_df.to_excel(filled_out_path, index=False)
-
-    # Step 3: resolve owner emails
-    print("Resolving owner emails via Outlook (best-effort)...")
-    email_cache: dict = {}
-    owner_col = "Owner"
-    if owner_col not in filled_df.columns:
-        # attempt to find correct column
-        owner_col = next((c for c in filled_df.columns if c.lower() == "owner"), "Owner")
-    if "Owner Email" not in filled_df.columns:
-        filled_df["Owner Email"] = ""
-
-    for i, row in filled_df.iterrows():
-        owner = normalize_owner(row.get(owner_col, ""))
-        if owner == "Unassigned":
-            continue
-        email = normalize_text(row.get("Owner Email", ""))
-        if email and email != "--":
-            continue
-        resolved = resolve_email_outlook(owner, email_cache)
-        filled_df.at[i, "Owner Email"] = resolved if resolved else "not found"
-
-    filled_df["Owner Email"] = filled_df["Owner Email"].map(normalize_email_value)
-
-    # overwrite the filled output file with emails added
     filled_df.to_excel(filled_out_path, index=False)
 
     # Step 4: export per-owner CSV
@@ -514,7 +556,7 @@ def main() -> None:
     print("Building owner template workbook...")
     template_out = out_dir / f"{inventory_path.stem} owner_template.xlsx"
     try:
-        build_template_from_inventory(cleaned_df, template_out, email_cache)
+        build_template_from_inventory(cleaned_df, template_out, custodian_email_map)
     except Exception as exc:
         print(f"Failed to build template workbook: {exc}")
 
